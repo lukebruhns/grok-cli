@@ -114,7 +114,7 @@ export class MorphEditorTool {
     editSnippet: string
   ): Promise<string> {
     try {
-      const response = await axios.post(`${this.morphBaseUrl}/chat/completions`, {
+      const response = await axios.post(`${this.morphBaseUrl}/responses/create`, {
         model: "morph-v3-large",
         messages: [
           {

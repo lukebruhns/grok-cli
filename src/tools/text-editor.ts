@@ -10,10 +10,13 @@ export class TextEditorTool {
 
   async view(
     filePath: string,
-    viewRange?: [number, number]
+    viewRange?: [number, number],
+    offset?: number,
+    limit?: number
   ): Promise<ToolResult> {
     try {
       const resolvedPath = path.resolve(filePath);
+      const MAX_LINE_LENGTH = 2000;
 
       if (await fs.pathExists(resolvedPath)) {
         const stats = await fs.stat(resolvedPath);
@@ -28,12 +31,17 @@ export class TextEditorTool {
 
         const content = await fs.readFile(resolvedPath, "utf-8");
         const lines = content.split("\n");
+        const totalLines = lines.length;
+
+        // Truncate long lines
+        const truncateLine = (line: string) =>
+          line.length > MAX_LINE_LENGTH ? line.substring(0, MAX_LINE_LENGTH) + '...[truncated]' : line;
 
         if (viewRange) {
           const [start, end] = viewRange;
           const selectedLines = lines.slice(start - 1, end);
           const numberedLines = selectedLines
-            .map((line, idx) => `${start + idx}: ${line}`)
+            .map((line, idx) => `${start + idx}: ${truncateLine(line)}`)
             .join("\n");
 
           return {
@@ -42,17 +50,21 @@ export class TextEditorTool {
           };
         }
 
-        const totalLines = lines.length;
-        const displayLines = totalLines > 10 ? lines.slice(0, 10) : lines;
+        // Support offset/limit pagination
+        const startLine = offset || 0;
+        const maxDefaultLines = 2000;
+        const lineLimit = limit || maxDefaultLines;
+        const displayLines = lines.slice(startLine, startLine + lineLimit);
         const numberedLines = displayLines
-          .map((line, idx) => `${idx + 1}: ${line}`)
+          .map((line, idx) => `${startLine + idx + 1}: ${truncateLine(line)}`)
           .join("\n");
+        const remainingLines = totalLines - (startLine + displayLines.length);
         const additionalLinesMessage =
-          totalLines > 10 ? `\n... +${totalLines - 10} lines` : "";
+          remainingLines > 0 ? `\n... +${remainingLines} more lines (use offset=${startLine + displayLines.length} to continue)` : "";
 
         return {
           success: true,
-          output: `Contents of ${filePath}:\n${numberedLines}${additionalLinesMessage}`,
+          output: `Contents of ${filePath} (${totalLines} lines total):\n${numberedLines}${additionalLinesMessage}`,
         };
       } else {
         return {
@@ -223,6 +235,84 @@ export class TextEditorTool {
       return {
         success: false,
         error: `Error creating ${filePath}: ${error.message}`,
+      };
+    }
+  }
+
+  async write(filePath: string, content: string): Promise<ToolResult> {
+    try {
+      const resolvedPath = path.resolve(filePath);
+      const exists = await fs.pathExists(resolvedPath);
+
+      const sessionFlags = this.confirmationService.getSessionFlags();
+      if (!sessionFlags.fileOperations && !sessionFlags.allOperations) {
+        let diffContent: string;
+
+        if (exists) {
+          const oldContent = await fs.readFile(resolvedPath, "utf-8");
+          const oldLines = oldContent.split("\n");
+          const newLines = content.split("\n");
+          diffContent = this.generateDiff(oldLines, newLines, filePath);
+        } else {
+          const contentLines = content.split("\n");
+          diffContent = [
+            `Created ${filePath}`,
+            `--- /dev/null`,
+            `+++ b/${filePath}`,
+            `@@ -0,0 +1,${contentLines.length} @@`,
+            ...contentLines.map((line) => `+${line}`),
+          ].join("\n");
+        }
+
+        const confirmationResult =
+          await this.confirmationService.requestConfirmation(
+            {
+              operation: exists ? "Overwrite file" : "Write new file",
+              filename: filePath,
+              showVSCodeOpen: false,
+              content: diffContent,
+            },
+            "file"
+          );
+
+        if (!confirmationResult.confirmed) {
+          return {
+            success: false,
+            error: confirmationResult.feedback || "Write cancelled by user",
+          };
+        }
+      }
+
+      let diff: string;
+      if (exists) {
+        const oldContent = await fs.readFile(resolvedPath, "utf-8");
+        const oldLines = oldContent.split("\n");
+        const newLines = content.split("\n");
+        diff = this.generateDiff(oldLines, newLines, filePath);
+      } else {
+        const oldLines: string[] = [];
+        const newLines = content.split("\n");
+        diff = this.generateDiff(oldLines, newLines, filePath);
+      }
+
+      const dir = path.dirname(resolvedPath);
+      await fs.ensureDir(dir);
+      await writeFilePromise(resolvedPath, content, "utf-8");
+
+      this.editHistory.push({
+        command: "create",
+        path: filePath,
+        content,
+      });
+
+      return {
+        success: true,
+        output: diff,
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: `Error writing ${filePath}: ${error.message}`,
       };
     }
   }

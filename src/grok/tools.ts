@@ -7,7 +7,7 @@ const BASE_GROK_TOOLS: GrokTool[] = [
     type: "function",
     function: {
       name: "view_file",
-      description: "View contents of a file or list directory contents",
+      description: "Read the contents of a file or list directory contents. Shows up to 2000 lines by default. Use offset/limit to paginate through large files.",
       parameters: {
         type: "object",
         properties: {
@@ -17,12 +17,19 @@ const BASE_GROK_TOOLS: GrokTool[] = [
           },
           start_line: {
             type: "number",
-            description:
-              "Starting line number for partial file view (optional)",
+            description: "Starting line number for partial file view (1-indexed, optional)",
           },
           end_line: {
             type: "number",
             description: "Ending line number for partial file view (optional)",
+          },
+          offset: {
+            type: "number",
+            description: "Line offset to start reading from (0-indexed, for pagination)",
+          },
+          limit: {
+            type: "number",
+            description: "Maximum number of lines to return (default: 2000)",
           },
         },
         required: ["path"],
@@ -32,18 +39,18 @@ const BASE_GROK_TOOLS: GrokTool[] = [
   {
     type: "function",
     function: {
-      name: "create_file",
-      description: "Create a new file with specified content",
+      name: "write_file",
+      description: "Write content to a file. Creates the file if it doesn't exist, or overwrites if it does. Use this when you need to create a new file or completely rewrite an existing file. For small targeted edits to existing files, prefer str_replace_editor instead.",
       parameters: {
         type: "object",
         properties: {
           path: {
             type: "string",
-            description: "Path where the file should be created",
+            description: "Path to the file to write",
           },
           content: {
             type: "string",
-            description: "Content to write to the file",
+            description: "The full content to write to the file",
           },
         },
         required: ["path", "content"],
@@ -54,7 +61,7 @@ const BASE_GROK_TOOLS: GrokTool[] = [
     type: "function",
     function: {
       name: "str_replace_editor",
-      description: "Replace specific text in a file. Use this for single line edits only",
+      description: "Replace specific text in an existing file. Supports both single-line and multi-line replacements. Always use view_file first to see the current file contents before editing. Include enough surrounding context in old_str to match uniquely in the file.",
       parameters: {
         type: "object",
         properties: {
@@ -64,35 +71,36 @@ const BASE_GROK_TOOLS: GrokTool[] = [
           },
           old_str: {
             type: "string",
-            description:
-              "Text to replace (must match exactly, or will use fuzzy matching for multi-line strings)",
+            description: "The exact text to find and replace. Include enough surrounding context to match uniquely.",
           },
           new_str: {
             type: "string",
-            description: "Text to replace with",
+            description: "The replacement text",
           },
           replace_all: {
             type: "boolean",
-            description:
-              "Replace all occurrences (default: false, only replaces first occurrence)",
+            description: "Replace all occurrences (default: false, only replaces first occurrence)",
           },
         },
         required: ["path", "old_str", "new_str"],
       },
     },
   },
-
   {
     type: "function",
     function: {
       name: "bash",
-      description: "Execute a bash command",
+      description: "Execute a bash command in the shell. Default timeout is 120 seconds. Use for running builds, tests, git operations, installing dependencies, and other system commands.",
       parameters: {
         type: "object",
         properties: {
           command: {
             type: "string",
             description: "The bash command to execute",
+          },
+          timeout: {
+            type: "number",
+            description: "Timeout in milliseconds (default: 120000, max: 600000). Increase for long-running commands like builds or installs.",
           },
         },
         required: ["command"],
@@ -102,9 +110,71 @@ const BASE_GROK_TOOLS: GrokTool[] = [
   {
     type: "function",
     function: {
+      name: "glob",
+      description: "Find files matching a glob pattern. Fast file discovery without reading contents. Supports patterns like '**/*.ts', 'src/**/*.tsx', '*.json'.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: {
+            type: "string",
+            description: "Glob pattern to match files (e.g. '**/*.ts', 'src/**/*.js', '*.json')",
+          },
+          path: {
+            type: "string",
+            description: "Directory to search in (default: current working directory)",
+          },
+        },
+        required: ["pattern"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "grep",
+      description: "Search file contents using ripgrep. Supports regex patterns, file type filtering, and multiple output modes. Use this for searching code, finding definitions, and locating text across files.",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: {
+            type: "string",
+            description: "The regex pattern to search for",
+          },
+          path: {
+            type: "string",
+            description: "File or directory to search in (default: current working directory)",
+          },
+          output_mode: {
+            type: "string",
+            enum: ["files_with_matches", "content", "count"],
+            description: "Output mode: 'content' shows matching lines (default), 'files_with_matches' shows only file paths, 'count' shows match counts per file",
+          },
+          glob: {
+            type: "string",
+            description: "Glob pattern to filter files (e.g. '*.ts', '*.{js,jsx}')",
+          },
+          type: {
+            type: "string",
+            description: "File type filter for ripgrep (e.g. 'ts', 'py', 'js')",
+          },
+          case_sensitive: {
+            type: "boolean",
+            description: "Whether search is case sensitive (default: false)",
+          },
+          context_lines: {
+            type: "number",
+            description: "Number of context lines to show around matches",
+          },
+        },
+        required: ["pattern"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "search",
-      description:
-        "Unified search tool for finding text content or files (similar to Cursor's search)",
+      description: "Unified search tool for finding text content or files. Combines ripgrep text search with fuzzy file finding.",
       parameters: {
         type: "object",
         properties: {
@@ -115,23 +185,19 @@ const BASE_GROK_TOOLS: GrokTool[] = [
           search_type: {
             type: "string",
             enum: ["text", "files", "both"],
-            description:
-              "Type of search: 'text' for content search, 'files' for file names, 'both' for both (default: 'both')",
+            description: "Type of search: 'text' for content search, 'files' for file names, 'both' for both (default: 'both')",
           },
           include_pattern: {
             type: "string",
-            description:
-              "Glob pattern for files to include (e.g. '*.ts', '*.js')",
+            description: "Glob pattern for files to include (e.g. '*.ts', '*.js')",
           },
           exclude_pattern: {
             type: "string",
-            description:
-              "Glob pattern for files to exclude (e.g. '*.log', 'node_modules')",
+            description: "Glob pattern for files to exclude (e.g. '*.log', 'node_modules')",
           },
           case_sensitive: {
             type: "boolean",
-            description:
-              "Whether search should be case sensitive (default: false)",
+            description: "Whether search should be case sensitive (default: false)",
           },
           whole_word: {
             type: "boolean",

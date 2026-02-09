@@ -4,11 +4,12 @@ import { render } from "ink";
 import { program } from "commander";
 import * as dotenv from "dotenv";
 import { GrokAgent } from "./agent/grok-agent.js";
+import { GrokApiError } from "./grok/client.js";
 import ChatInterface from "./ui/components/chat-interface.js";
 import { getSettingsManager } from "./utils/settings-manager.js";
 import { ConfirmationService } from "./utils/confirmation-service.js";
 import { createMCPCommand } from "./commands/mcp.js";
-import type { ChatCompletionMessageParam } from "openai/resources/chat";
+import { logger } from "./utils/logger.js";
 
 // Load environment variables
 dotenv.config();
@@ -31,11 +32,13 @@ process.on("SIGTERM", () => {
 
 // Handle uncaught exceptions to prevent hanging
 process.on("uncaughtException", (error) => {
+  logger.error("Uncaught exception", error);
   console.error("Uncaught exception:", error);
   process.exit(1);
 });
 
 process.on("unhandledRejection", (reason, promise) => {
+  logger.error("Unhandled rejection", reason instanceof Error ? reason : new Error(String(reason)));
   console.error("Unhandled rejection at:", promise, "reason:", reason);
   process.exit(1);
 });
@@ -145,89 +148,53 @@ async function handleCommitAndPushHeadless(
       process.exit(1);
     }
 
-    console.log("✅ git add: Changes staged");
+    console.log("✅ git add .: Changes staged");
 
-    // Get staged changes for commit message generation
-    const diffResult = await agent.executeBashCommand("git diff --cached");
+    // Generate commit message
+    const commitMessageEntries = await agent.processUserMessage("/generate-commit-message");
 
-    // Generate commit message using AI
-    const commitPrompt = `Generate a concise, professional git commit message for these changes:
-
-Git Status:
-${initialStatusResult.output}
-
-Git Diff (staged changes):
-${diffResult.output || "No staged changes shown"}
-
-Follow conventional commit format (feat:, fix:, docs:, etc.) and keep it under 72 characters.
-Respond with ONLY the commit message, no additional text.`;
-
-    console.log("🤖 Generating commit message...");
-
-    const commitMessageEntries = await agent.processUserMessage(commitPrompt);
-    let commitMessage = "";
-
-    // Extract the commit message from the AI response
-    for (const entry of commitMessageEntries) {
-      if (entry.type === "assistant" && entry.content.trim()) {
-        commitMessage = entry.content.trim();
-        break;
+    for (const entry of commitMessageEntries.choices) {
+      if (entry.message.content) {
+        console.log("\nGenerated commit message:");
+        console.log(entry.message.content);
       }
     }
 
-    if (!commitMessage) {
-      console.log("❌ Failed to generate commit message");
-      process.exit(1);
-    }
+    // Commit changes
+    const commitMessage = commitMessageEntries.choices[0].message.content || "Auto-generated commit";
+    const commitResult = await agent.executeBashCommand(`git commit -m "${commitMessage.replace(/"/g, '\\"')}"`);
 
-    // Clean the commit message
-    const cleanCommitMessage = commitMessage.replace(/^["']|["']$/g, "");
-    console.log(`✅ Generated commit message: "${cleanCommitMessage}"`);
-
-    // Execute the commit
-    const commitCommand = `git commit -m "${cleanCommitMessage}"`;
-    const commitResult = await agent.executeBashCommand(commitCommand);
-
-    if (commitResult.success) {
+    if (!commitResult.success) {
       console.log(
-        `✅ git commit: ${
-          commitResult.output?.split("\n")[0] || "Commit successful"
-        }`
+        `❌ git commit: ${commitResult.error || "Failed to commit changes"}`
       );
-
-      // If commit was successful, push to remote
-      // First try regular push, if it fails try with upstream setup
-      let pushResult = await agent.executeBashCommand("git push");
-
-      if (
-        !pushResult.success &&
-        pushResult.error?.includes("no upstream branch")
-      ) {
-        console.log("🔄 Setting upstream and pushing...");
-        pushResult = await agent.executeBashCommand("git push -u origin HEAD");
-      }
-
-      if (pushResult.success) {
-        console.log(
-          `✅ git push: ${
-            pushResult.output?.split("\n")[0] || "Push successful"
-          }`
-        );
-      } else {
-        console.log(`❌ git push: ${pushResult.error || "Push failed"}`);
-        process.exit(1);
-      }
-    } else {
-      console.log(`❌ git commit: ${commitResult.error || "Commit failed"}`);
       process.exit(1);
     }
+
+    console.log("✅ git commit: Changes committed");
+
+    // Push changes
+    const pushResult = await agent.executeBashCommand("git push");
+
+    if (!pushResult.success) {
+      console.log(
+        `❌ git push: ${pushResult.error || "Failed to push changes"}`
+      );
+      process.exit(1);
+    }
+
+    console.log("✅ git push: Changes pushed to remote");
   } catch (error: any) {
-    console.error("❌ Error during commit and push:", error.message);
+    if (error instanceof GrokApiError) {
+      console.error(`❌ API Error: ${error.info.message}`);
+    } else {
+      console.error("❌ Error during commit and push:", error.message);
+    }
     process.exit(1);
   }
 }
 
-// Headless mode processing function
+// Handle prompt in headless mode
 async function processPromptHeadless(
   prompt: string,
   apiKey: string,
@@ -238,81 +205,36 @@ async function processPromptHeadless(
   try {
     const agent = new GrokAgent(apiKey, baseURL, model, maxToolRounds);
 
-    // Configure confirmation service for headless mode (auto-approve all operations)
+    // Auto-approve all operations in headless mode (no UI to confirm)
     const confirmationService = ConfirmationService.getInstance();
     confirmationService.setSessionFlag("allOperations", true);
 
-    // Process the user message
+    console.log("🤖 Processing prompt...\n");
+    console.log(`> ${prompt}\n`);
+
     const chatEntries = await agent.processUserMessage(prompt);
 
-    // Convert chat entries to OpenAI compatible message objects
-    const messages: ChatCompletionMessageParam[] = [];
-
-    for (const entry of chatEntries) {
-      switch (entry.type) {
-        case "user":
-          messages.push({
-            role: "user",
-            content: entry.content,
-          });
-          break;
-
-        case "assistant":
-          const assistantMessage: ChatCompletionMessageParam = {
-            role: "assistant",
-            content: entry.content,
-          };
-
-          // Add tool calls if present
-          if (entry.toolCalls && entry.toolCalls.length > 0) {
-            assistantMessage.tool_calls = entry.toolCalls.map((toolCall) => ({
-              id: toolCall.id,
-              type: "function",
-              function: {
-                name: toolCall.function.name,
-                arguments: toolCall.function.arguments,
-              },
-            }));
-          }
-
-          messages.push(assistantMessage);
-          break;
-
-        case "tool_result":
-          if (entry.toolCall) {
-            messages.push({
-              role: "tool",
-              tool_call_id: entry.toolCall.id,
-              content: entry.content,
-            });
-          }
-          break;
+    for (const entry of chatEntries.choices) {
+      if (entry.message.content) {
+        console.log(entry.message.content);
       }
     }
-
-    // Output each message as a separate JSON object
-    for (const message of messages) {
-      console.log(JSON.stringify(message));
-    }
   } catch (error: any) {
-    // Output error in OpenAI compatible format
-    console.log(
-      JSON.stringify({
-        role: "assistant",
-        content: `Error: ${error.message}`,
-      })
-    );
+    if (error instanceof GrokApiError) {
+      console.error(`❌ API Error: ${error.info.message}`);
+    } else {
+      console.error("❌ Error processing prompt:", error.message);
+    }
     process.exit(1);
   }
 }
 
+// Main program
 program
   .name("grok")
-  .description(
-    "A conversational AI CLI tool powered by Grok with text editor capabilities"
-  )
-  .version("1.0.1")
-  .argument("[message...]", "Initial message to send to Grok")
+  .description("Grok CLI - AI-powered command line assistant")
+  .version("0.0.34")
+  .argument("[message...]", "initial message to send (multi-word support)")
   .option("-d, --directory <dir>", "set working directory", process.cwd())
   .option("-k, --api-key <key>", "Grok API key (or set GROK_API_KEY env var)")
   .option(
@@ -332,7 +254,14 @@ program
     "maximum number of tool execution rounds (default: 400)",
     "400"
   )
+  .option(
+    "--debug",
+    "enable debug logging of API requests/responses to ~/.grok/logs/"
+  )
   .action(async (message, options) => {
+    if (options.debug) {
+      process.env.GROK_DEBUG = "1";
+    }
     if (options.directory) {
       try {
         process.chdir(options.directory);
@@ -417,7 +346,14 @@ gitCommand
     "maximum number of tool execution rounds (default: 400)",
     "400"
   )
+  .option(
+    "--debug",
+    "enable debug logging of API requests/responses to ~/.grok/logs/"
+  )
   .action(async (options) => {
+    if (options.debug) {
+      process.env.GROK_DEBUG = "1";
+    }
     if (options.directory) {
       try {
         process.chdir(options.directory);

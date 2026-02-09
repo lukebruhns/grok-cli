@@ -4,3 +4,5 @@ export { MorphEditorTool } from "./morph-editor.js";
 export { TodoTool } from "./todo-tool.js";
 export { ConfirmationTool } from "./confirmation-tool.js";
 export { SearchTool } from "./search.js";
+export { GlobTool } from "./glob.js";
+export { GrepTool } from "./grep-tool.js";

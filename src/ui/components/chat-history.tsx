@@ -98,10 +98,16 @@ const MemoizedChatEntry = React.memo(
               return "Update";
             case "create_file":
               return "Create";
+            case "write_file":
+              return "Write";
             case "bash":
               return "Bash";
             case "search":
               return "Search";
+            case "glob":
+              return "Glob";
+            case "grep":
+              return "Grep";
             case "create_todo_list":
               return "Created Todo";
             case "update_todo_list":
@@ -118,8 +124,11 @@ const MemoizedChatEntry = React.memo(
           if (toolCall?.function?.arguments) {
             try {
               const args = JSON.parse(toolCall.function.arguments);
-              if (toolCall.function.name === "search") {
-                return args.query;
+              if (toolCall.function.name === "search" || toolCall.function.name === "grep") {
+                return args.pattern || args.query;
+              }
+              if (toolCall.function.name === "glob") {
+                return args.pattern;
               }
               return args.path || args.file_path || args.command || "";
             } catch {
@@ -152,16 +161,16 @@ const MemoizedChatEntry = React.memo(
           }
           return content;
         };
+        const diffToolNames = ["str_replace_editor", "write_file", "create_file"];
+        const isDiffTool = diffToolNames.includes(entry.toolCall?.function?.name || "");
         const shouldShowDiff =
-          entry.toolCall?.function?.name === "str_replace_editor" &&
+          isDiffTool &&
           entry.toolResult?.success &&
-          entry.content.includes("Updated") &&
           entry.content.includes("---") &&
           entry.content.includes("+++");
 
         const shouldShowFileContent =
-          (entry.toolCall?.function?.name === "view_file" ||
-            entry.toolCall?.function?.name === "create_file") &&
+          entry.toolCall?.function?.name === "view_file" &&
           entry.toolResult?.success &&
           !shouldShowDiff;
 
